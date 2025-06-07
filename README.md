@@ -4,9 +4,9 @@
 
 MCP SuperAssistant Proxy lets you run multiple **MCP stdio-based** and **SSE-based** servers and expose them through a single SSE endpoint. This allows MCP SuperAssistant and other tools to connect to multiple remote MCP servers and tools via a unified proxy.
 
-## Current Version: 0.0.16
+## Current Version: 0.0.17
 
-Enhanced fork with improved memory management, SSE connection stability, and comprehensive test coverage.
+Enhanced fork with improved memory management, SSE connection stability, comprehensive test coverage, and fixed SSE session cleanup when browser tabs close.
 
 ## Installation & Usage
 

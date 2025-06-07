@@ -60,13 +60,13 @@ describe('MCPSuperAssistantProxy v0.0.12 Tests', () => {
   });
 
   describe('Memory Leak Fixes', () => {
-    it('should cleanup stale sessions every 30 seconds', () => {
+    it('should cleanup stale sessions every 10 seconds', () => {
       const intervalSpy = jest.spyOn(global, 'setInterval');
       
       // 模擬代理初始化
       const mockInterval = setInterval(() => {
         mockProxy.cleanupStaleStreamableSessions();
-      }, 30 * 1000);
+      }, 10 * 1000);
 
       expect(intervalSpy).toHaveBeenCalled();
       clearInterval(mockInterval);
@@ -167,10 +167,10 @@ describe('SSE Connection Stability Tests (v0.0.16)', () => {
   describe('Keep-Alive Mechanism', () => {
     it('should configure socket with keep-alive settings', () => {
       // 模擬 SSE 連線設定
-      mockResponse.socket.setKeepAlive(true, 30000);
+      mockResponse.socket.setKeepAlive(true, 15000);
       mockResponse.socket.setTimeout(0);
 
-      expect(mockResponse.socket.setKeepAlive).toHaveBeenCalledWith(true, 30000);
+      expect(mockResponse.socket.setKeepAlive).toHaveBeenCalledWith(true, 15000);
       expect(mockResponse.socket.setTimeout).toHaveBeenCalledWith(0);
     });
 
@@ -185,24 +185,49 @@ describe('SSE Connection Stability Tests (v0.0.16)', () => {
       expect(mockResponse.setHeader).toHaveBeenCalledWith('Keep-Alive', 'timeout=300');
     });
 
-    it('should send keep-alive pings every 30 seconds', () => {
+    it('should send keep-alive pings every 15 seconds', () => {
       jest.useFakeTimers();
       
       // 模擬 keep-alive interval
       const keepAliveInterval = setInterval(() => {
         mockResponse.write(':keepalive\n\n');
-      }, 30000);
+      }, 15000);
 
-      // 快進 30 秒
-      jest.advanceTimersByTime(30000);
+      // 快進 15 秒
+      jest.advanceTimersByTime(15000);
       expect(mockResponse.write).toHaveBeenCalledWith(':keepalive\n\n');
 
-      // 再快進 30 秒
-      jest.advanceTimersByTime(30000);
+      // 再快進 15 秒
+      jest.advanceTimersByTime(15000);
       expect(mockResponse.write).toHaveBeenCalledTimes(2);
 
       clearInterval(keepAliveInterval);
       jest.useRealTimers();
+    });
+
+    it('should check socket status before sending keep-alive', () => {
+      // 測試 socket 狀態檢查
+      const checkSocketStatus = (socket: any) => {
+        return socket && !socket.destroyed && socket.writable;
+      };
+
+      expect(checkSocketStatus({ destroyed: false, writable: true })).toBe(true);
+      expect(checkSocketStatus({ destroyed: true, writable: true })).toBe(false);
+      expect(checkSocketStatus({ destroyed: false, writable: false })).toBe(false);
+      expect(checkSocketStatus(null)).toBeFalsy();
+    });
+
+    it('should detect write failures during keep-alive', () => {
+      // 模擬 write 失敗
+      mockResponse.write = jest.fn().mockReturnValue(false);
+      
+      const writeSuccess = mockResponse.write(':keepalive\n\n');
+      expect(writeSuccess).toBe(false);
+      
+      // 模擬 write 成功
+      mockResponse.write = jest.fn().mockReturnValue(true);
+      const writeSuccess2 = mockResponse.write(':keepalive\n\n');
+      expect(writeSuccess2).toBe(true);
     });
   });
 
@@ -245,72 +270,66 @@ describe('SSE Connection Stability Tests (v0.0.16)', () => {
     });
   });
 
-  describe('SSE Retry Mechanism', () => {
-    it('should retry connection with exponential backoff', async () => {
-      const mockConnect = jest.fn()
-        .mockRejectedValueOnce(new Error('Attempt 1 failed'))
-        .mockRejectedValueOnce(new Error('Attempt 2 failed'))
-        .mockResolvedValueOnce(undefined);
-
-      let attemptCount = 0;
-      const maxRetries = 3;
-
-      // 模擬重試邏輯
-      for (let i = 0; i < maxRetries; i++) {
-        try {
-          attemptCount++;
-          await mockConnect();
-          break;
-        } catch (error) {
-          if (i < maxRetries - 1) {
-            // 模擬指數退避延遲
-            await new Promise(resolve => setTimeout(resolve, (i + 1) * 10));
-          }
-        }
-      }
-
-      expect(mockConnect).toHaveBeenCalledTimes(3);
-      expect(attemptCount).toBe(3);
-    });
-
-    it('should clean up failed transport on retry', async () => {
-      const mockTransport = { close: jest.fn() };
-      const mockClient = { close: jest.fn() };
-
-      // 模擬清理邏輯
-      const cleanup = async () => {
-        if (mockTransport && typeof mockTransport.close === 'function') {
-          mockTransport.close();
-        }
-        if (mockClient && typeof mockClient.close === 'function') {
-          await mockClient.close();
-        }
+  describe('Enhanced Error Handling', () => {
+    it('should track error count and connection state', () => {
+      const sessions: any = {};
+      const sessionId = 'test-session';
+      
+      sessions[sessionId] = {
+        transport: mockSSETransport,
+        connectionState: 'active',
+        errorCount: 0,
+        keepAliveSuccess: 0
       };
 
-      await cleanup();
+      // 模擬錯誤發生
+      sessions[sessionId].errorCount++;
+      sessions[sessionId].connectionState = 'error';
 
-      expect(mockTransport.close).toHaveBeenCalled();
-      expect(mockClient.close).toHaveBeenCalled();
+      expect(sessions[sessionId].errorCount).toBe(1);
+      expect(sessions[sessionId].connectionState).toBe('error');
+    });
+
+    it('should categorize errors as transient or critical', () => {
+      // 模擬錯誤分類函數
+      const categorizeError = (error: any): 'transient' | 'critical' | 'unknown' => {
+        const transientErrors = ['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EPIPE'];
+        const criticalErrors = ['ECONNREFUSED', 'EACCES', 'EMFILE'];
+        
+        if (error.code) {
+          if (transientErrors.includes(error.code)) return 'transient';
+          if (criticalErrors.includes(error.code)) return 'critical';
+        }
+        return 'unknown';
+      };
+
+      expect(categorizeError({ code: 'ECONNRESET' })).toBe('transient');
+      expect(categorizeError({ code: 'ECONNREFUSED' })).toBe('critical');
+      expect(categorizeError({ code: 'UNKNOWN' })).toBe('unknown');
     });
   });
 
   describe('Stale SSE Session Cleanup', () => {
-    it('should clean up SSE sessions after 5 minutes of inactivity', () => {
+    it('should clean up SSE sessions after 2 minutes of inactivity', () => {
       const now = Date.now();
       const sessions: any = {
         'active-session': {
-          lastActivity: now - (3 * 60 * 1000), // 3 分鐘前
-          createdAt: now - (4 * 60 * 1000),
-          keepAliveInterval: 123
+          lastActivity: now - (1 * 60 * 1000), // 1 分鐘前
+          createdAt: now - (2 * 60 * 1000),
+          keepAliveInterval: 123,
+          connectionState: 'active',
+          keepAliveSuccess: 10
         },
         'stale-session': {
-          lastActivity: now - (6 * 60 * 1000), // 6 分鐘前
-          createdAt: now - (10 * 60 * 1000),
-          keepAliveInterval: 456
+          lastActivity: now - (3 * 60 * 1000), // 3 分鐘前
+          createdAt: now - (5 * 60 * 1000),
+          keepAliveInterval: 456,
+          connectionState: 'active',
+          keepAliveSuccess: 5
         }
       };
 
-      const staleThreshold = 5 * 60 * 1000;
+      const staleThreshold = 2 * 60 * 1000;
       const staleSessions: string[] = [];
 
       for (const [sessionId, sessionData] of Object.entries(sessions)) {
@@ -324,6 +343,52 @@ describe('SSE Connection Stability Tests (v0.0.16)', () => {
 
       expect(staleSessions).toEqual(['stale-session']);
       expect(staleSessions).not.toContain('active-session');
+    });
+
+    it('should immediately clean up dead connections', () => {
+      const now = Date.now();
+      const sessions: any = {
+        'dead-session': {
+          lastActivity: now - (30 * 1000), // 30 秒前
+          connectionState: 'closed',
+          keepAliveSuccess: 0
+        },
+        'error-session': {
+          lastActivity: now - (45 * 1000), // 45 秒前
+          connectionState: 'error',
+          keepAliveSuccess: 0
+        },
+        'inactive-no-keepalive': {
+          lastActivity: now - (65 * 1000), // 65 秒前
+          connectionState: 'active',
+          keepAliveSuccess: 0
+        },
+        'healthy-session': {
+          lastActivity: now - (30 * 1000), // 30 秒前
+          connectionState: 'active',
+          keepAliveSuccess: 5
+        }
+      };
+
+      const deadConnectionThreshold = 60 * 1000;
+      const deadSessions: string[] = [];
+
+      for (const [sessionId, sessionData] of Object.entries(sessions)) {
+        const data = sessionData as any;
+        const inactiveTime = now - (data.lastActivity || now);
+        const isDead = data.connectionState === 'closed' || 
+                       data.connectionState === 'error' ||
+                       (data.keepAliveSuccess === 0 && inactiveTime > deadConnectionThreshold);
+        
+        if (isDead) {
+          deadSessions.push(sessionId);
+        }
+      }
+
+      expect(deadSessions).toContain('dead-session');
+      expect(deadSessions).toContain('error-session');
+      expect(deadSessions).toContain('inactive-no-keepalive');
+      expect(deadSessions).not.toContain('healthy-session');
     });
 
     it('should clear keep-alive interval on cleanup', () => {

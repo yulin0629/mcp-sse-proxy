@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 MCP SuperAssistant Proxy is a TypeScript application that acts as a proxy server for the Model Context Protocol (MCP). It allows multiple MCP servers (both stdio-based and SSE-based) to be exposed through a single endpoint, supporting backwards compatibility between different MCP transport protocols.
 
-**Current Version**: v0.0.16 (@yulin0629/mcp-superassistant-proxy)
+**Current Version**: v0.0.17 (@yulin0629/mcp-superassistant-proxy)
 - Fork of the original @srbhptl39/mcp-superassistant-proxy package
 - Supports both modern Streamable HTTP (protocol 2025-03-26) and legacy SSE (protocol 2024-11-05)
 

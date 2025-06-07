@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.17] - 2025-06-07
+
+### Fixed
+- **Critical**: Fixed SSE sessions not being released when browser tabs are closed
+  - Enhanced socket status detection before sending keep-alive
+  - Improved cleanup mechanism with socket.destroy() when needed
+  - Better detection of dead connections through write failures
+- Improved error categorization system (transient vs critical errors)
+  - Only cleanup on critical errors or after 5+ accumulated errors
+  - Prevents premature disconnection on transient network issues
+
+### Changed
+- **Performance Improvements**
+  - Reduced keep-alive interval from 30s to 15s for faster dead connection detection
+  - Reduced cleanup check interval from 30s to 10s
+  - Reduced stale session threshold from 5 minutes to 2 minutes
+  - Added 1-minute threshold for dead connection detection
+- **Enhanced Connection State Tracking**
+  - Added connectionState field (active/closed/error)
+  - Added errorCount tracking
+  - Added keepAliveSuccess counter
+  - Improved session cleanup logging
+- **Simplified Implementation**
+  - Removed unnecessary SSE retry mechanism
+  - Removed unused clientInfo and lastError tracking
+  - Removed TCP_NODELAY setting (not beneficial for SSE)
+
+### Improved
+- Socket configuration now uses 15s TCP keep-alive probes (was 30s)
+- Keep-alive mechanism now checks socket writability before sending
+- Cleanup functions now properly destroy underlying sockets
+- Better handling of concurrent cleanup events
+
 ## [0.0.16] - 2025-06-07
 
 ### Added
@@ -93,6 +126,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.0.11] - Previous version
 - Initial release with multi-transport support
 
+[0.0.17]: https://github.com/yulin0629/mcp-sse-proxy/compare/v0.0.16...v0.0.17
 [0.0.16]: https://github.com/yulin0629/mcp-sse-proxy/compare/v0.0.15...v0.0.16
 [0.0.15]: https://github.com/yulin0629/mcp-sse-proxy/compare/v0.0.14...v0.0.15
 [0.0.14]: https://github.com/yulin0629/mcp-sse-proxy/compare/v0.0.13...v0.0.14

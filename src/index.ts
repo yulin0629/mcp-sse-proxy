@@ -111,6 +111,9 @@ class MCPSuperAssistantProxy {
      createdAt?: number;
      lastActivity?: number;
      keepAliveInterval?: NodeJS.Timeout;
+     connectionState?: 'active' | 'closed' | 'error';
+     errorCount?: number;
+     keepAliveSuccess?: number;
    }>;
  } = {
    streamable: {},
@@ -154,11 +157,11 @@ class MCPSuperAssistantProxy {
    this.setupRoutes();
    this.setupServerHandlers();
    
-   // Start periodic cleanup of stale sessions (every 30 seconds)
+   // Start periodic cleanup of stale sessions (every 10 seconds for faster detection)
    setInterval(() => {
      this.cleanupStaleStreamableSessions();
      this.cleanupStaleSSESessions();
-   }, 30 * 1000);
+   }, 10 * 1000);
  }
 
  private async safeAsyncOperation<T>(operation: () => Promise<T>, timeoutMs: number = 5000, description: string = 'operation'): Promise<T | null> {
@@ -350,28 +353,28 @@ class MCPSuperAssistantProxy {
    this.app.get('/sse', async (req, res) => {
      let sessionId: string | undefined;
      try {
-       // Check SSE session limit
-       const currentSSESessionCount = Object.keys(this.transports.sse).length;
-       if (currentSSESessionCount >= 50) {
-         console.warn(`SSE session limit reached (${currentSSESessionCount} sessions). Rejecting new connection from ${req.ip}`);
-         res.status(503).send('Service temporarily unavailable: Too many active SSE sessions');
-         return;
-       }
-       
-       if (this.options.logLevel === 'debug') {
-         console.log('New SSE connection from', req.ip);
-       }
-       
-       // Set headers for SSE with keep-alive optimizations
-       res.setHeader('Content-Type', 'text/event-stream');
-       res.setHeader('Cache-Control', 'no-cache, no-transform');
-       res.setHeader('Connection', 'keep-alive');
-       res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering in Nginx
-       res.setHeader('Keep-Alive', 'timeout=300'); // 5 minutes keep-alive
-       
-       // Configure socket to prevent timeout
-       req.socket.setKeepAlive(true, 30000); // Enable TCP keep-alive with 30s probe
-       req.socket.setTimeout(0); // Disable socket timeout
+         // Check SSE session limit
+         const currentSSESessionCount = Object.keys(this.transports.sse).length;
+         if (currentSSESessionCount >= 50) {
+           console.warn(`SSE session limit reached (${currentSSESessionCount} sessions). Rejecting new connection from ${req.ip}`);
+           res.status(503).send('Service temporarily unavailable: Too many active SSE sessions');
+           return;
+         }
+         
+         if (this.options.logLevel === 'debug') {
+           console.log(`New SSE connection from ${req.ip}`);
+         }
+         
+         // Set headers for SSE with enhanced keep-alive optimizations
+         res.setHeader('Content-Type', 'text/event-stream');
+         res.setHeader('Cache-Control', 'no-cache, no-transform');
+         res.setHeader('Connection', 'keep-alive');
+         res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering in Nginx
+         res.setHeader('Keep-Alive', 'timeout=300'); // 5 minutes keep-alive
+         
+         // Enhanced socket configuration for better stability
+         req.socket.setKeepAlive(true, 15000); // Reduced TCP keep-alive probe to 15s
+         req.socket.setTimeout(0); // Disable socket timeout
        
        // Create SSE transport with correct message endpoint
        const protocol = req.get('X-Forwarded-Proto') || (req.secure ? 'https' : 'http');
@@ -400,26 +403,63 @@ class MCPSuperAssistantProxy {
        
        sessionId = sseTransport.sessionId;
        if (sessionId) {
-         // Store session data with additional metadata
+         // Store session data with enhanced metadata
          this.transports.sse[sessionId] = {
            transport: sseTransport,
            server: sseServer,
            response: res,
            createdAt: Date.now(),
-           lastActivity: Date.now()
+           lastActivity: Date.now(),
+           connectionState: 'active',
+           errorCount: 0,
+           keepAliveSuccess: 0
          };
          
          if (this.options.logLevel === 'debug') {
            console.log(`SSE session created: ${sessionId}`);
          }
          
-         // Start keep-alive ping interval
+         // Enhanced keep-alive mechanism with error recovery
          const keepAliveInterval = setInterval(() => {
            try {
              if (sessionId && this.transports.sse[sessionId]) {
+               // Check socket status first
+               const socket = res.socket;
+               if (!socket || socket.destroyed || !socket.writable) {
+                 clearInterval(keepAliveInterval);
+                 if (this.options.logLevel === 'debug') {
+                   console.log(`Keep-alive detected dead socket for session ${sessionId}, cleaning up`);
+                 }
+                 this.cleanupSSESession(sessionId);
+                 return;
+               }
+               
                // Send SSE comment as keep-alive
-               res.write(':keepalive\n\n');
+               const writeSuccess = res.write(':keepalive\n\n');
+               
+               if (!writeSuccess) {
+                 clearInterval(keepAliveInterval);
+                 if (this.options.logLevel === 'debug') {
+                   console.log(`Keep-alive write failed for session ${sessionId}, cleaning up`);
+                 }
+                 this.cleanupSSESession(sessionId);
+                 return;
+               }
+               
                this.transports.sse[sessionId].lastActivity = Date.now();
+               
+               // Track successful keep-alives
+               const session = this.transports.sse[sessionId];
+               if (session) {
+                 if (!session.keepAliveSuccess) {
+                   session.keepAliveSuccess = 0;
+                 }
+                 session.keepAliveSuccess++;
+                 
+                 if (this.options.logLevel === 'debug' && session.keepAliveSuccess % 10 === 0) {
+                   console.log(`SSE session ${sessionId}: ${session.keepAliveSuccess} successful keep-alives`);
+                 }
+               }
              } else {
                // Session no longer exists, clear interval
                clearInterval(keepAliveInterval);
@@ -428,10 +468,13 @@ class MCPSuperAssistantProxy {
              // Connection might be closed, clean up
              clearInterval(keepAliveInterval);
              if (this.options.logLevel === 'debug') {
-               console.log(`Keep-alive failed for session ${sessionId}, cleaning up`);
+               const errorMsg = this.formatNetworkError(error);
+               console.log(`Keep-alive failed for session ${sessionId}: ${errorMsg}`);
              }
+             // Trigger cleanup
+             this.cleanupSSESession(sessionId);
            }
-         }, 30000); // Send keep-alive every 30 seconds
+         }, 15000); // Reduced keep-alive interval to 15 seconds for better stability
          
          // Store interval reference for cleanup
          if (sessionId && this.transports.sse[sessionId]) {
@@ -447,20 +490,37 @@ class MCPSuperAssistantProxy {
          this.cleanupSSESession(sessionId);
        };
 
-       // Handle transport events
+       // Enhanced transport event handlers with error recovery
        sseTransport.onclose = () => {
          if (this.options.logLevel === 'debug') {
            console.log(`SSE transport closed (session ${sessionId})`);
+         }
+         if (sessionId && this.transports.sse[sessionId]) {
+           this.transports.sse[sessionId].connectionState = 'closed';
          }
          safeCleanup();
        };
        
        sseTransport.onerror = (err) => {
-         if (this.options.logLevel === 'debug') {
+         if (sessionId && this.transports.sse[sessionId]) {
+           const session = this.transports.sse[sessionId];
+           session.errorCount = (session.errorCount || 0) + 1;
+           
            const errorMsg = this.formatNetworkError(err);
-           console.log(`SSE transport error (session ${sessionId}): ${errorMsg}`);
+           const errorCategory = this.categorizeError(err);
+           
+           if (this.options.logLevel === 'debug') {
+             console.log(`SSE transport error (session ${sessionId}): ${errorMsg}, category: ${errorCategory}, count: ${session.errorCount}`);
+           }
+           
+           // Only cleanup on critical errors or after too many errors
+           if (errorCategory === 'critical' || session.errorCount > 5) {
+             session.connectionState = 'error';
+             safeCleanup();
+           }
+         } else {
+           safeCleanup();
          }
-         safeCleanup();
        };
        
        // Handle client disconnection
@@ -775,8 +835,8 @@ class MCPSuperAssistantProxy {
    
    const session = this.transports.sse[sessionId];
    
-   if (this.options.logLevel === 'debug') {
-     console.log(`Cleaning up SSE session: ${sessionId}`);
+   if (this.options.logLevel === 'debug' || this.options.logLevel === 'info') {
+     console.log(`Cleaning up SSE session: ${sessionId} (keep-alives: ${session.keepAliveSuccess || 0}, state: ${session.connectionState || 'unknown'})`);
    }
    
    // Clear keep-alive interval if exists
@@ -786,6 +846,24 @@ class MCPSuperAssistantProxy {
    
    // Remove from tracking first to prevent re-entry
    delete this.transports.sse[sessionId];
+   
+   // Force close the response stream
+   try {
+     if (session.response && !session.response.headersSent) {
+       session.response.end();
+     } else if (session.response) {
+       // Force destroy the underlying socket
+       const socket = session.response.socket;
+       if (socket && !socket.destroyed) {
+         socket.destroy();
+       }
+     }
+   } catch (error) {
+     if (this.options.logLevel === 'debug') {
+       const errorMsg = this.formatNetworkError(error);
+       console.log(`Error closing response for session ${sessionId}: ${errorMsg}`);
+     }
+   }
    
    // Close the transport if possible
    try {
@@ -848,7 +926,8 @@ class MCPSuperAssistantProxy {
 
  private cleanupStaleSSESessions(): void {
    const now = Date.now();
-   const staleThreshold = 5 * 60 * 1000; // 5 minutes for SSE (longer due to keep-alive)
+   const staleThreshold = 2 * 60 * 1000; // Reduced to 2 minutes for faster cleanup
+   const deadConnectionThreshold = 60 * 1000; // 1 minute for dead connections
    
    const sessionCount = Object.keys(this.transports.sse).length;
    if (this.options.logLevel === 'info' && sessionCount > 0) {
@@ -859,12 +938,55 @@ class MCPSuperAssistantProxy {
      const lastActivity = sessionData.lastActivity || sessionData.createdAt || now;
      const inactiveTime = now - lastActivity;
      
+     // Check if connection is dead (no keep-alive success)
+     const isDead = sessionData.connectionState === 'closed' || 
+                    sessionData.connectionState === 'error' ||
+                    (sessionData.keepAliveSuccess === 0 && inactiveTime > deadConnectionThreshold);
+     
+     // Clean up dead connections immediately
+     if (isDead) {
+       if (this.options.logLevel === 'debug' || this.options.logLevel === 'info') {
+         console.log(`Cleaning up dead SSE session: ${sessionId} (state: ${sessionData.connectionState}, inactive: ${Math.round(inactiveTime / 1000)}s)`);
+       }
+       this.cleanupSSESession(sessionId);
+       continue;
+     }
+     
+     // Clean up stale connections
      if (inactiveTime > staleThreshold) {
        if (this.options.logLevel === 'debug' || this.options.logLevel === 'info') {
-         console.log(`Cleaning up stale SSE session: ${sessionId} (inactive: ${Math.round(inactiveTime / 1000)}s)`);
+         console.log(`Cleaning up stale SSE session: ${sessionId} (inactive: ${Math.round(inactiveTime / 1000)}s, keep-alives: ${sessionData.keepAliveSuccess || 0})`);
        }
        
-       this.cleanupSSESession(sessionId);
+       // Try to write a test message to check if connection is still alive
+       try {
+         if (sessionData.response) {
+           // Check if socket is still writable
+           const socket = sessionData.response.socket;
+           if (!socket || socket.destroyed || !socket.writable) {
+             if (this.options.logLevel === 'debug') {
+               console.log(`SSE session ${sessionId} has dead socket, cleaning up`);
+             }
+             this.cleanupSSESession(sessionId);
+             continue;
+           }
+           
+           // Try to write ping
+           const writeSuccess = sessionData.response.write(':ping\n\n');
+           if (!writeSuccess) {
+             if (this.options.logLevel === 'debug') {
+               console.log(`SSE session ${sessionId} write failed, cleaning up`);
+             }
+             this.cleanupSSESession(sessionId);
+           }
+         }
+       } catch (error) {
+         // Connection is dead, clean it up
+         if (this.options.logLevel === 'debug') {
+           console.log(`SSE session ${sessionId} failed ping test, cleaning up`);
+         }
+         this.cleanupSSESession(sessionId);
+       }
      }
    }
  }
@@ -1128,6 +1250,38 @@ class MCPSuperAssistantProxy {
    
    // Fallback to string representation
    return String(error);
+ }
+
+ private categorizeError(error: any): 'transient' | 'critical' | 'unknown' {
+   if (!error) {
+     return 'unknown';
+   }
+   
+   // Network errors that might recover
+   const transientErrors = ['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EPIPE'];
+   // Critical errors that won't recover
+   const criticalErrors = ['ECONNREFUSED', 'EACCES', 'EMFILE'];
+   
+   if (error.code) {
+     if (transientErrors.includes(error.code)) {
+       return 'transient';
+     }
+     if (criticalErrors.includes(error.code)) {
+       return 'critical';
+     }
+   }
+   
+   // HTTP status codes
+   if (error.status) {
+     if (error.status >= 500 && error.status < 600) {
+       return 'transient'; // Server errors might recover
+     }
+     if (error.status >= 400 && error.status < 500) {
+       return 'critical'; // Client errors won't recover
+     }
+   }
+   
+   return 'unknown';
  }
 
  /**
