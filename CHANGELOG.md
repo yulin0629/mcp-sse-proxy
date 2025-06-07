@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.16] - 2025-06-07
+
+### Added
+- **SSE Connection Stability Improvements**
+  - Implemented keep-alive mechanism sending heartbeat every 30 seconds
+  - Added TCP socket keep-alive with 30-second probe interval
+  - Added Keep-Alive HTTP header with 5-minute timeout
+  - Track session creation time and last activity timestamp
+  - Automatic cleanup of inactive SSE sessions after 5 minutes
+  - SSE connection retry mechanism with exponential backoff (up to 3 retries)
+- **Comprehensive tests for SSE stability features**
+  - Keep-alive mechanism tests
+  - Activity tracking tests
+  - Retry mechanism tests
+  - Stale session cleanup tests
+
+### Fixed
+- SSE connections dropping after being idle
+- Connection instability issues reported by users
+- Memory leaks from uncleaned keep-alive intervals
+
+### Changed
+- Enhanced SSE transport error handling with better cleanup
+- Improved resource cleanup on connection failures
+- Better logging for SSE session lifecycle
+
 ## [0.0.15] - 2025-06-07
 
 ### Fixed
@@ -67,6 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.0.11] - Previous version
 - Initial release with multi-transport support
 
+[0.0.16]: https://github.com/yulin0629/mcp-sse-proxy/compare/v0.0.15...v0.0.16
 [0.0.15]: https://github.com/yulin0629/mcp-sse-proxy/compare/v0.0.14...v0.0.15
 [0.0.14]: https://github.com/yulin0629/mcp-sse-proxy/compare/v0.0.13...v0.0.14
 [0.0.13]: https://github.com/yulin0629/mcp-sse-proxy/compare/v0.0.12...v0.0.13

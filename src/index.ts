@@ -108,6 +108,9 @@ class MCPSuperAssistantProxy {
      transport: SSEServerTransport;
      server: Server;
      response: express.Response;
+     createdAt?: number;
+     lastActivity?: number;
+     keepAliveInterval?: NodeJS.Timeout;
    }>;
  } = {
    streamable: {},
@@ -154,6 +157,7 @@ class MCPSuperAssistantProxy {
    // Start periodic cleanup of stale sessions (every 30 seconds)
    setInterval(() => {
      this.cleanupStaleStreamableSessions();
+     this.cleanupStaleSSESessions();
    }, 30 * 1000);
  }
 
@@ -358,11 +362,16 @@ class MCPSuperAssistantProxy {
          console.log('New SSE connection from', req.ip);
        }
        
-       // Set headers for SSE
+       // Set headers for SSE with keep-alive optimizations
        res.setHeader('Content-Type', 'text/event-stream');
        res.setHeader('Cache-Control', 'no-cache, no-transform');
        res.setHeader('Connection', 'keep-alive');
        res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering in Nginx
+       res.setHeader('Keep-Alive', 'timeout=300'); // 5 minutes keep-alive
+       
+       // Configure socket to prevent timeout
+       req.socket.setKeepAlive(true, 30000); // Enable TCP keep-alive with 30s probe
+       req.socket.setTimeout(0); // Disable socket timeout
        
        // Create SSE transport with correct message endpoint
        const protocol = req.get('X-Forwarded-Proto') || (req.secure ? 'https' : 'http');
@@ -391,15 +400,42 @@ class MCPSuperAssistantProxy {
        
        sessionId = sseTransport.sessionId;
        if (sessionId) {
-         // Store session data
+         // Store session data with additional metadata
          this.transports.sse[sessionId] = {
            transport: sseTransport,
            server: sseServer,
-           response: res
+           response: res,
+           createdAt: Date.now(),
+           lastActivity: Date.now()
          };
          
          if (this.options.logLevel === 'debug') {
            console.log(`SSE session created: ${sessionId}`);
+         }
+         
+         // Start keep-alive ping interval
+         const keepAliveInterval = setInterval(() => {
+           try {
+             if (sessionId && this.transports.sse[sessionId]) {
+               // Send SSE comment as keep-alive
+               res.write(':keepalive\n\n');
+               this.transports.sse[sessionId].lastActivity = Date.now();
+             } else {
+               // Session no longer exists, clear interval
+               clearInterval(keepAliveInterval);
+             }
+           } catch (error) {
+             // Connection might be closed, clean up
+             clearInterval(keepAliveInterval);
+             if (this.options.logLevel === 'debug') {
+               console.log(`Keep-alive failed for session ${sessionId}, cleaning up`);
+             }
+           }
+         }, 30000); // Send keep-alive every 30 seconds
+         
+         // Store interval reference for cleanup
+         if (sessionId && this.transports.sse[sessionId]) {
+           (this.transports.sse[sessionId] as any).keepAliveInterval = keepAliveInterval;
          }
        }
        
@@ -481,6 +517,9 @@ class MCPSuperAssistantProxy {
          if (this.options.logLevel === 'debug') {
            console.log(`POST to SSE transport (session ${sessionId})`);
          }
+         
+         // Update last activity timestamp
+         session.lastActivity = Date.now();
          
          try {
            await session.transport.handlePostMessage(req, res, req.body);
@@ -740,6 +779,11 @@ class MCPSuperAssistantProxy {
      console.log(`Cleaning up SSE session: ${sessionId}`);
    }
    
+   // Clear keep-alive interval if exists
+   if (session.keepAliveInterval) {
+     clearInterval(session.keepAliveInterval);
+   }
+   
    // Remove from tracking first to prevent re-entry
    delete this.transports.sse[sessionId];
    
@@ -798,6 +842,29 @@ class MCPSuperAssistantProxy {
        }
        
        delete this.transports.streamable[sessionId];
+     }
+   }
+ }
+
+ private cleanupStaleSSESessions(): void {
+   const now = Date.now();
+   const staleThreshold = 5 * 60 * 1000; // 5 minutes for SSE (longer due to keep-alive)
+   
+   const sessionCount = Object.keys(this.transports.sse).length;
+   if (this.options.logLevel === 'info' && sessionCount > 0) {
+     console.log(`Active SSE sessions: ${sessionCount}`);
+   }
+   
+   for (const [sessionId, sessionData] of Object.entries(this.transports.sse)) {
+     const lastActivity = sessionData.lastActivity || sessionData.createdAt || now;
+     const inactiveTime = now - lastActivity;
+     
+     if (inactiveTime > staleThreshold) {
+       if (this.options.logLevel === 'debug' || this.options.logLevel === 'info') {
+         console.log(`Cleaning up stale SSE session: ${sessionId} (inactive: ${Math.round(inactiveTime / 1000)}s)`);
+       }
+       
+       this.cleanupSSESession(sessionId);
      }
    }
  }
@@ -1125,43 +1192,66 @@ class MCPSuperAssistantProxy {
      console.log(`Streamable HTTP transport connection failed: ${errorMsg}`);
      console.log('2. Falling back to deprecated HTTP+SSE transport...');
      
+     // Try SSE with retry mechanism
      let sseTransport: any = null;
-     try {
-       // Create SSE transport pointing to /sse endpoint
-       const sseUrl = new URL(baseUrl);
-       sseUrl.pathname = '/sse';
-       
-       sseTransport = new SSEClientTransport(sseUrl);
-       
-       await Promise.race([
-         client.connect(sseTransport),
-         new Promise<never>((_, reject) => 
-           setTimeout(() => reject(new Error(`SSE connection timeout after ${connectionTimeout}ms`)), connectionTimeout)
-         )
-       ]);
-       
-       console.log('Successfully connected using deprecated HTTP+SSE transport.');
-       
-       return {
-         transport: sseTransport,
-         transportType: 'sse'
-       };
-     } catch (sseError) {
-       // Clean up failed SSE transport
-       if (sseTransport) {
-         try {
-           if (typeof sseTransport.close === 'function') {
-             sseTransport.close();
+     let retryCount = 0;
+     const maxRetries = 3;
+     let lastError: any = null;
+     
+     while (retryCount < maxRetries) {
+       try {
+         // Create SSE transport pointing to /sse endpoint
+         const sseUrl = new URL(baseUrl);
+         sseUrl.pathname = '/sse';
+         
+         sseTransport = new SSEClientTransport(sseUrl);
+         
+         await Promise.race([
+           client.connect(sseTransport),
+           new Promise<never>((_, reject) => 
+             setTimeout(() => reject(new Error(`SSE connection timeout after ${connectionTimeout}ms`)), connectionTimeout)
+           )
+         ]);
+         
+         console.log('Successfully connected using deprecated HTTP+SSE transport.');
+         
+         return {
+           transport: sseTransport,
+           transportType: 'sse'
+         };
+       } catch (sseError) {
+         lastError = sseError;
+         retryCount++;
+         
+         // Clean up failed SSE transport
+         if (sseTransport) {
+           try {
+             if (typeof sseTransport.close === 'function') {
+               sseTransport.close();
+             }
+           } catch (cleanupError) {
+             // Ignore cleanup errors
            }
-         } catch (cleanupError) {
-           // Ignore cleanup errors
+         }
+         
+         // Also try to close the client to free any resources
+         try {
+           await client.close();
+         } catch (clientCloseError) {
+           // Ignore client close errors
+         }
+         
+         if (retryCount < maxRetries) {
+           const sseErrorMsg = this.formatNetworkError(sseError);
+           console.log(`SSE connection attempt ${retryCount} failed: ${sseErrorMsg}. Retrying in ${retryCount}s...`);
+           await new Promise(resolve => setTimeout(resolve, retryCount * 1000));
          }
        }
-       
-       const sseErrorMsg = this.formatNetworkError(sseError);
-       console.error(`Failed to connect with either transport method:\n1. Streamable HTTP error: ${errorMsg}\n2. SSE error: ${sseErrorMsg}`);
-       throw new Error('Could not connect to server with any available transport');
      }
+     
+     const sseErrorMsg = this.formatNetworkError(lastError);
+     console.error(`Failed to connect with either transport method after ${maxRetries} SSE retries:\n1. Streamable HTTP error: ${errorMsg}\n2. SSE error: ${sseErrorMsg}`);
+     throw new Error('Could not connect to server with any available transport');
    }
  }
 

@@ -4,7 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-MCP SuperAssistant Proxy is a TypeScript application that acts as a proxy server for the Model Context Protocol (MCP). It allows multiple MCP servers (both stdio-based and SSE-based) to be exposed through a single SSE endpoint, supporting backwards compatibility between different MCP transport protocols.
+MCP SuperAssistant Proxy is a TypeScript application that acts as a proxy server for the Model Context Protocol (MCP). It allows multiple MCP servers (both stdio-based and SSE-based) to be exposed through a single endpoint, supporting backwards compatibility between different MCP transport protocols.
+
+**Current Version**: v0.0.16 (@yulin0629/mcp-superassistant-proxy)
+- Fork of the original @srbhptl39/mcp-superassistant-proxy package
+- Supports both modern Streamable HTTP (protocol 2025-03-26) and legacy SSE (protocol 2024-11-05)
 
 ## Common Development Tasks
 
@@ -20,7 +24,7 @@ npm run start
 ### Running the Proxy
 ```bash
 # Run directly with npx
-npx -y @srbhptl39/mcp-superassistant-proxy@latest --config path/to/config.json
+npx -y @yulin0629/mcp-superassistant-proxy@latest --config path/to/config.json
 
 # Run from source
 npm run build && node dist/index.js --config config.json --port 3006
@@ -95,3 +99,27 @@ The proxy requires a JSON configuration file specifying MCP servers:
 - All server handlers are copied to session-specific server instances
 - CORS is enabled by default for browser compatibility
 - Health endpoints can be configured for monitoring
+- Session limits: 100 for Streamable HTTP, 50 for SSE
+- Automatic cleanup of stale sessions every 30 seconds
+- SSE connections have keep-alive mechanism (30-second heartbeats)
+
+## Testing
+
+Run the test suite to verify functionality:
+```bash
+npm test
+```
+
+Tests cover:
+- Session management and limits
+- Memory leak prevention
+- Resource cleanup
+- Protocol fallback mechanisms
+
+
+# PS
+修正問題時，請盡量修改原檔案，而不是開新檔案。
+
+## Deployment Process
+
+- 發版的順序是 **新增和修正** readme package.json claude.md and changelog(最後) >  github > npm
