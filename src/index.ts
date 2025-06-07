@@ -151,10 +151,10 @@ class MCPSuperAssistantProxy {
    this.setupRoutes();
    this.setupServerHandlers();
    
-  //  // Start periodic cleanup of stale sessions (every 2 minutes)
-  //  setInterval(() => {
-  //    this.cleanupStaleStreamableSessions();
-  //  }, 2 * 60 * 1000);
+   // Start periodic cleanup of stale sessions (every 30 seconds)
+   setInterval(() => {
+     this.cleanupStaleStreamableSessions();
+   }, 30 * 1000);
  }
 
  private async safeAsyncOperation<T>(operation: () => Promise<T>, timeoutMs: number = 5000, description: string = 'operation'): Promise<T | null> {
@@ -205,6 +205,21 @@ class MCPSuperAssistantProxy {
            console.log(`Reusing existing session: ${sessionId}`);
          }
        } else if (!sessionId && isInitializeRequest(req.body)) {
+         // Check session limit
+         const currentSessionCount = Object.keys(this.transports.streamable).length;
+         if (currentSessionCount >= 100) {
+           console.warn(`Session limit reached (${currentSessionCount} sessions). Rejecting new connection from ${req.ip}`);
+           res.status(503).json({
+             jsonrpc: '2.0',
+             error: {
+               code: -32000,
+               message: 'Service temporarily unavailable: Too many active sessions',
+             },
+             id: null,
+           });
+           return;
+         }
+         
          // New initialization request - create a new server instance for this session
          if (this.options.logLevel === 'debug') {
            console.log(`Creating new session for initialize request from ${req.ip}`);
@@ -250,7 +265,15 @@ class MCPSuperAssistantProxy {
          };
 
          // Connect the session server to the transport (not the main server)
-         await sessionServer.connect(transport);
+         try {
+           await sessionServer.connect(transport);
+         } catch (connectError) {
+           // Clean up on connection failure
+           if (transport.sessionId) {
+             delete this.transports.streamable[transport.sessionId];
+           }
+           throw connectError;
+         }
        } else {
          // Invalid request
          if (this.options.logLevel === 'debug') {
@@ -323,6 +346,14 @@ class MCPSuperAssistantProxy {
    this.app.get('/sse', async (req, res) => {
      let sessionId: string | undefined;
      try {
+       // Check SSE session limit
+       const currentSSESessionCount = Object.keys(this.transports.sse).length;
+       if (currentSSESessionCount >= 50) {
+         console.warn(`SSE session limit reached (${currentSSESessionCount} sessions). Rejecting new connection from ${req.ip}`);
+         res.status(503).send('Service temporarily unavailable: Too many active SSE sessions');
+         return;
+       }
+       
        if (this.options.logLevel === 'debug') {
          console.log('New SSE connection from', req.ip);
        }
@@ -741,18 +772,26 @@ class MCPSuperAssistantProxy {
 
  private cleanupStaleStreamableSessions(): void {
    const now = Date.now();
-   const staleThreshold = 5 * 60 * 1000; // 5 minutes
+   const staleThreshold = 2 * 60 * 1000; // 2 minutes (reduced from 5)
+   
+   const sessionCount = Object.keys(this.transports.streamable).length;
+   if (this.options.logLevel === 'info' && sessionCount > 0) {
+     console.log(`Active streamable sessions: ${sessionCount}`);
+   }
    
    for (const [sessionId, sessionData] of Object.entries(this.transports.streamable)) {
      const age = now - sessionData.createdAt;
      if (age > staleThreshold) {
-       if (this.options.logLevel === 'debug') {
+       if (this.options.logLevel === 'debug' || this.options.logLevel === 'info') {
          console.log(`Cleaning up stale streamable session: ${sessionId} (age: ${Math.round(age / 1000)}s)`);
        }
        
        try {
          if (sessionData.transport && typeof sessionData.transport.close === 'function') {
            sessionData.transport.close();
+         }
+         if (sessionData.server && typeof sessionData.server.close === 'function') {
+           sessionData.server.close();
          }
        } catch (error) {
          console.error(`Error closing stale session ${sessionId}:`, error);
@@ -1063,7 +1102,7 @@ class MCPSuperAssistantProxy {
        transportType: 'streamable-http'
      };
    } catch (error) {
-     // Clean up failed transport
+     // Clean up failed transport and client
      if (streamableTransport) {
        try {
          if (typeof streamableTransport.close === 'function') {
@@ -1072,6 +1111,13 @@ class MCPSuperAssistantProxy {
        } catch (cleanupError) {
          // Ignore cleanup errors
        }
+     }
+     
+     // Also try to close the client to free any resources
+     try {
+       await client.close();
+     } catch (clientCloseError) {
+       // Ignore client close errors
      }
      
      // Step 2: If transport fails, try the older SSE transport

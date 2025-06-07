@@ -2,6 +2,11 @@
 
 MCP SuperAssistant Proxy lets you run multiple **MCP stdio-based** and **SSE-based** servers and expose them through a single SSE endpoint. This allows MCP SuperAssistant and other tools to connect to multiple remote MCP servers and tools via a unified proxy.
 
+## Version 0.0.12
+
+### Important Fix
+This version fixes a critical memory leak that caused the proxy to become unresponsive after running for a while. If you're experiencing connection issues with older versions, please upgrade immediately.
+
 ## Installation & Usage
 
 Run MCP SuperAssistant Proxy via `npx`:
@@ -93,6 +98,8 @@ MCP SuperAssistant Proxy is designed with modularity in mind:
 - Stdio-to-SSE mode uses standard logs and SSE-to-Stdio mode logs via stderr (as otherwise it would prevent stdio functionality).
 - The SSE-to-SSE mode provides automatic reconnection with backoff if the remote server connection is lost.
 - Health endpoints can be added for monitoring.
+- Session management with automatic cleanup of stale connections (2-minute timeout).
+- Connection limits to prevent resource exhaustion (100 Streamable HTTP sessions, 50 SSE sessions).
 
 ---
 
