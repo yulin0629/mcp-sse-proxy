@@ -1,7 +1,7 @@
 {
-  "name": "@srbhptl39/mcp-superassistant-proxy",
+  "name": "@yulin0629/mcp-superassistant-proxy",
   "version": "0.0.12",
-  "description": "Run MCP SuperAssistant over SSE or visa versa",
+  "description": "Enhanced fork of @srbhptl39/mcp-superassistant-proxy with improved memory management and session limits",
   "keywords": [
     "mcp",
     "stdio",
@@ -11,8 +11,17 @@
     "bridge"
   ],
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yulin0629/mcp-sse-proxy.git"
+  },
+  "homepage": "https://github.com/yulin0629/mcp-sse-proxy",
+  "bugs": {
+    "url": "https://github.com/yulin0629/mcp-sse-proxy/issues"
+  },
+  "author": "yulin0629",
   "bin": {
-    "@srbhptl39/mcp-superassistant-proxy": "dist/index.js"
+    "mcp-superassistant-proxy": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",

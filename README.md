@@ -1,5 +1,7 @@
 # MCP SuperAssistant Proxy
 
+> **Fork Note**: This is an enhanced fork based on the original npm package [@srbhptl39/mcp-superassistant-proxy](https://www.npmjs.com/package/@srbhptl39/mcp-superassistant-proxy) with improved memory management, session limits, and comprehensive test coverage.
+
 MCP SuperAssistant Proxy lets you run multiple **MCP stdio-based** and **SSE-based** servers and expose them through a single SSE endpoint. This allows MCP SuperAssistant and other tools to connect to multiple remote MCP servers and tools via a unified proxy.
 
 ## Version 0.0.12
@@ -12,7 +14,7 @@ This version fixes a critical memory leak that caused the proxy to become unresp
 Run MCP SuperAssistant Proxy via `npx`:
 
 ```bash
-npx -y @srbhptl39/mcp-superassistant-proxy@latest --config path/to/config.json
+npx -y @yulin0629/mcp-superassistant-proxy@latest --config path/to/config.json
 ```
 
 ### CLI Options
