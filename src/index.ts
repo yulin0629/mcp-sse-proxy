@@ -1775,3 +1775,11 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
  `);
   process.exit(0);
 }
+
+// Only run main if not in help mode
+if (!process.argv.includes("--help") && !process.argv.includes("-h")) {
+  main().catch((error) => {
+    console.error("Failed to start MCP SuperAssistant Proxy:", error);
+    process.exit(1);
+  });
+}
