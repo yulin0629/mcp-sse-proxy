@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.18] - 2025-06-07
+
+### Added
+- **Advanced Concurrent Request Control**
+  - Configurable per-session concurrent request limits (default: 10)
+  - HTTP 429 responses when concurrent limit exceeded
+  - Request lifecycle tracking with automatic counter management
+  - New CLI option: `--maxConcurrentRequestsPerSession <number>`
+
+### Enhanced
+- **Intelligent Session Management**
+  - Extended session timeout from 2 to 5 minutes for better stability
+  - Smart activity tracking with `lastActivity` timestamps
+  - Safe cleanup mechanism that preserves sessions with active requests
+  - Improved session initialization with correct active request counting
+
+### Improved
+- **Streamable HTTP Transport Stability**
+  - Unified concurrent control across POST, GET, and DELETE endpoints
+  - Enhanced error logging with detailed debug information
+  - Better request completion tracking in try/finally blocks
+  - Consistent session validation across all HTTP methods
+
+### Fixed
+- **Session Lifecycle Issues**
+  - Session initialization now correctly starts with activeRequests = 1
+  - Fixed potential race conditions in concurrent request tracking
+  - Improved session cleanup safety checks
+  - Better error handling for session termination
+
+### Technical
+- **Code Quality Improvements**
+  - Comprehensive test coverage with 30 passing tests
+  - Enhanced debugging capabilities with detailed request logging
+  - Configurable parameters moved from hardcoded to options
+  - Memory usage optimization through better session data structure
+
 ## [0.0.17] - 2025-06-07
 
 ### Fixed

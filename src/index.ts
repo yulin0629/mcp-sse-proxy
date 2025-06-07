@@ -90,6 +90,7 @@ interface MCPSuperAssistantProxyOptions {
   cors: boolean;
   healthEndpoints: string[];
   timeout: number;
+  maxConcurrentRequestsPerSession: number;
 }
 
 class MCPSuperAssistantProxy {
@@ -103,6 +104,8 @@ class MCPSuperAssistantProxy {
      transport: StreamableHTTPServerTransport;
      server: Server;
      createdAt: number;
+     lastActivity: number;
+     activeRequests: number;
    }>;
    sse: Record<string, {
      transport: SSEServerTransport;
@@ -206,10 +209,27 @@ class MCPSuperAssistantProxy {
        }
 
        if (sessionId && this.transports.streamable[sessionId]) {
-         // Reuse existing transport
-         transport = this.transports.streamable[sessionId].transport;
+         // Check concurrent request limit
+         const session = this.transports.streamable[sessionId];
+         if (session.activeRequests >= this.options.maxConcurrentRequestsPerSession) {
+           res.status(429).json({
+             jsonrpc: '2.0',
+             error: {
+               code: -32000,
+               message: 'Too many concurrent requests for this session',
+             },
+             id: null,
+           });
+           return;
+         }
+         
+         // Reuse existing transport and update activity
+         transport = session.transport;
+         session.lastActivity = Date.now();
+         session.activeRequests++;
+         
          if (this.options.logLevel === 'debug') {
-           console.log(`Reusing existing session: ${sessionId}`);
+           console.log(`Reusing existing session: ${sessionId}, active requests: ${session.activeRequests}`);
          }
        } else if (!sessionId && isInitializeRequest(req.body)) {
          // Check session limit
@@ -253,7 +273,9 @@ class MCPSuperAssistantProxy {
              this.transports.streamable[newSessionId] = {
                transport,
                server: sessionServer,
-               createdAt: Date.now()
+               createdAt: Date.now(),
+               lastActivity: Date.now(),
+               activeRequests: 1 // Initialize request is active
              };
              if (this.options.logLevel === 'debug') {
                console.log(`New Streamable HTTP session initialized: ${newSessionId}, total sessions: ${Object.keys(this.transports.streamable).length}`);
@@ -298,7 +320,17 @@ class MCPSuperAssistantProxy {
        }
 
        // Handle the request
-       await transport.handleRequest(req, res, req.body);
+       try {
+         await transport.handleRequest(req, res, req.body);
+       } finally {
+         // Decrease active request count after request completion
+         if (sessionId && this.transports.streamable[sessionId]) {
+           this.transports.streamable[sessionId].activeRequests--;
+           if (this.options.logLevel === 'debug') {
+             console.log(`Request completed for session ${sessionId}, active requests: ${this.transports.streamable[sessionId].activeRequests}`);
+           }
+         }
+       }
      } catch (error) {
        console.error(`Error handling MCP request from ${req.ip}:`, error);
        res.status(500).json({
@@ -314,38 +346,105 @@ class MCPSuperAssistantProxy {
 
    // Handle GET requests for server-to-client notifications via SSE
    this.app.get('/mcp', async (req, res) => {
+     const sessionId = req.headers['mcp-session-id'] as string | undefined;
      try {
-       const sessionId = req.headers['mcp-session-id'] as string | undefined;
        if (!sessionId || !this.transports.streamable[sessionId]) {
+         if (this.options.logLevel === 'debug') {
+           console.log(`GET /mcp: Invalid session ID ${sessionId} from ${req.ip}`);
+         }
          res.status(400).send('Invalid or missing session ID');
          return;
        }
        
-       const transport = this.transports.streamable[sessionId];
-       await transport.transport.handleRequest(req, res);
+       const session = this.transports.streamable[sessionId];
+       
+       // Check concurrent request limit
+       if (session.activeRequests >= this.options.maxConcurrentRequestsPerSession) {
+         res.status(429).send('Too many concurrent requests for this session');
+         return;
+       }
+       
+       session.lastActivity = Date.now();
+       session.activeRequests++;
+       
+       if (this.options.logLevel === 'debug') {
+         console.log(`GET /mcp: Handling request for session ${sessionId} from ${req.ip}, active requests: ${session.activeRequests}`);
+       }
+       
+       try {
+         await session.transport.handleRequest(req, res);
+       } finally {
+         // Decrease active request count after request completion
+         if (this.transports.streamable[sessionId]) {
+           this.transports.streamable[sessionId].activeRequests--;
+           if (this.options.logLevel === 'debug') {
+             console.log(`GET request completed for session ${sessionId}, active requests: ${this.transports.streamable[sessionId].activeRequests}`);
+           }
+         }
+       }
      } catch (error) {
+       const errorMsg = this.formatNetworkError(error);
+       if (this.options.logLevel === 'debug') {
+         console.log(`GET /mcp error for session ${sessionId}: ${errorMsg}`);
+       }
        console.error('Error handling GET request:', error);
-       res.status(500).send('Internal server error');
+       if (!res.headersSent) {
+         res.status(500).send('Internal server error');
+       }
      }
    });
 
    // Handle DELETE requests for session termination
    this.app.delete('/mcp', async (req, res) => {
+     const sessionId = req.headers['mcp-session-id'] as string | undefined;
      try {
-       const sessionId = req.headers['mcp-session-id'] as string | undefined;
        if (!sessionId || !this.transports.streamable[sessionId]) {
+         if (this.options.logLevel === 'debug') {
+           console.log(`DELETE /mcp: Invalid session ID ${sessionId} from ${req.ip}`);
+         }
          res.status(400).send('Invalid or missing session ID');
          return;
        }
        
-       const transportData = this.transports.streamable[sessionId];
-       await transportData.transport.handleRequest(req, res, req.body);
+       const session = this.transports.streamable[sessionId];
        
-       // Clean up the session
-       delete this.transports.streamable[sessionId];
+       if (this.options.logLevel === 'debug') {
+         console.log(`DELETE /mcp: Terminating session ${sessionId} from ${req.ip}, active requests: ${session.activeRequests}`);
+       }
+       
+       // Warn if there are active requests when terminating
+       if (session.activeRequests > 0) {
+         console.warn(`Terminating session ${sessionId} with ${session.activeRequests} active requests`);
+       }
+       
+       session.lastActivity = Date.now();
+       session.activeRequests++;
+       
+       try {
+         await session.transport.handleRequest(req, res, req.body);
+       } finally {
+         // Clean up the session after handling the delete request
+         delete this.transports.streamable[sessionId];
+         
+         if (this.options.logLevel === 'debug') {
+           console.log(`DELETE /mcp: Session ${sessionId} terminated successfully`);
+         }
+       }
      } catch (error) {
+       const errorMsg = this.formatNetworkError(error);
+       if (this.options.logLevel === 'debug') {
+         console.log(`DELETE /mcp error for session ${sessionId}: ${errorMsg}`);
+       }
        console.error('Error handling DELETE request:', error);
-       res.status(500).send('Internal server error');
+       
+       // Still clean up the session even if there was an error
+       if (sessionId && this.transports.streamable[sessionId]) {
+         delete this.transports.streamable[sessionId];
+       }
+       
+       if (!res.headersSent) {
+         res.status(500).send('Internal server error');
+       }
      }
    });
 
@@ -894,7 +993,7 @@ class MCPSuperAssistantProxy {
 
  private cleanupStaleStreamableSessions(): void {
    const now = Date.now();
-   const staleThreshold = 2 * 60 * 1000; // 2 minutes (reduced from 5)
+   const staleThreshold = 5 * 60 * 1000; // 5 minutes for better stability
    
    const sessionCount = Object.keys(this.transports.streamable).length;
    if (this.options.logLevel === 'info' && sessionCount > 0) {
@@ -902,10 +1001,21 @@ class MCPSuperAssistantProxy {
    }
    
    for (const [sessionId, sessionData] of Object.entries(this.transports.streamable)) {
-     const age = now - sessionData.createdAt;
-     if (age > staleThreshold) {
+     const lastActivity = sessionData.lastActivity || sessionData.createdAt;
+     const inactiveTime = now - lastActivity;
+     
+     if (inactiveTime > staleThreshold) {
+       // Check if there are active requests before cleaning up
+       if (sessionData.activeRequests > 0) {
+         if (this.options.logLevel === 'debug') {
+           console.log(`Delaying cleanup of session ${sessionId}: has ${sessionData.activeRequests} active requests (inactive: ${Math.round(inactiveTime / 1000)}s)`);
+         }
+         // Skip cleanup if there are active requests - they might be long-running
+         continue;
+       }
+       
        if (this.options.logLevel === 'debug' || this.options.logLevel === 'info') {
-         console.log(`Cleaning up stale streamable session: ${sessionId} (age: ${Math.round(age / 1000)}s)`);
+         console.log(`Cleaning up stale streamable session: ${sessionId} (inactive: ${Math.round(inactiveTime / 1000)}s, active requests: ${sessionData.activeRequests})`);
        }
        
        try {
@@ -1818,6 +1928,11 @@ async function main() {
       default: 30000,
       description: 'Connection timeout in milliseconds'
     })
+    .option('maxConcurrentRequestsPerSession', {
+      type: 'number',
+      default: 10,
+      description: 'Maximum concurrent requests per session'
+    })
     .option('debug', {
       type: 'boolean',
       default: false,
@@ -1836,7 +1951,8 @@ async function main() {
       logLevel: argv.debug ? 'debug' : (argv.logLevel as 'info' | 'debug' | 'none'),
       cors: argv.cors,
       healthEndpoints: (argv.healthEndpoint as string[]) || [],
-      timeout: argv.timeout
+      timeout: argv.timeout,
+      maxConcurrentRequestsPerSession: argv.maxConcurrentRequestsPerSession
     };
 
     // Create and initialize mcpsuperassistantproxy

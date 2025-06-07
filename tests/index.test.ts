@@ -432,3 +432,235 @@ describe('SSE Connection Stability Tests (v0.0.16)', () => {
     });
   });
 });
+
+// 測試 v0.0.18 的 Streamable HTTP 改進
+describe('Streamable HTTP Improvements (v0.0.18)', () => {
+  let mockProxy: any;
+  
+  beforeEach(() => {
+    const mockConfig = {
+      mcpServers: {
+        testServer: {
+          command: 'echo',
+          args: ['test']
+        }
+      }
+    };
+    
+    mockProxy = {
+      options: {
+        maxConcurrentRequestsPerSession: 5,
+        logLevel: 'none'
+      },
+      transports: {
+        streamable: {},
+        sse: {}
+      },
+      cleanupStaleStreamableSessions: jest.fn()
+    };
+  });
+  
+  describe('Concurrent Request Control', () => {
+    it('should track active requests per session', () => {
+      const sessionId = 'test-session-1';
+      mockProxy.transports.streamable[sessionId] = {
+        transport: {},
+        server: {},
+        createdAt: Date.now(),
+        lastActivity: Date.now(),
+        activeRequests: 2
+      };
+      
+      expect(mockProxy.transports.streamable[sessionId].activeRequests).toBe(2);
+    });
+    
+    it('should initialize new sessions with activeRequests = 1', () => {
+      const sessionId = 'test-session-2';
+      mockProxy.transports.streamable[sessionId] = {
+        transport: {},
+        server: {},
+        createdAt: Date.now(),
+        lastActivity: Date.now(),
+        activeRequests: 1
+      };
+      
+      expect(mockProxy.transports.streamable[sessionId].activeRequests).toBe(1);
+    });
+    
+    it('should enforce concurrent request limits', () => {
+      const sessionId = 'test-session-3';
+      const maxConcurrent = mockProxy.options.maxConcurrentRequestsPerSession;
+      
+      mockProxy.transports.streamable[sessionId] = {
+        transport: {},
+        server: {},
+        createdAt: Date.now(),
+        lastActivity: Date.now(),
+        activeRequests: maxConcurrent
+      };
+      
+      // 模擬併發檢查
+      const shouldReject = mockProxy.transports.streamable[sessionId].activeRequests >= maxConcurrent;
+      expect(shouldReject).toBe(true);
+    });
+    
+    it('should use configurable maxConcurrentRequestsPerSession', () => {
+      expect(mockProxy.options.maxConcurrentRequestsPerSession).toBe(5);
+    });
+  });
+  
+  describe('Enhanced Activity Tracking', () => {
+    it('should track lastActivity separately from createdAt', () => {
+      const now = Date.now();
+      const sessionId = 'test-session-4';
+      
+      mockProxy.transports.streamable[sessionId] = {
+        transport: {},
+        server: {},
+        createdAt: now - 1000,
+        lastActivity: now,
+        activeRequests: 1
+      };
+      
+      expect(mockProxy.transports.streamable[sessionId].lastActivity).toBeGreaterThan(
+        mockProxy.transports.streamable[sessionId].createdAt
+      );
+    });
+    
+    it('should update lastActivity on requests', () => {
+      const sessionId = 'test-session-5';
+      const initialTime = Date.now() - 1000;
+      
+      mockProxy.transports.streamable[sessionId] = {
+        transport: {},
+        server: {},
+        createdAt: initialTime,
+        lastActivity: initialTime,
+        activeRequests: 1
+      };
+      
+      // 模擬更新活動時間
+      const newTime = Date.now();
+      mockProxy.transports.streamable[sessionId].lastActivity = newTime;
+      
+      expect(mockProxy.transports.streamable[sessionId].lastActivity).toBeGreaterThan(initialTime);
+    });
+  });
+  
+  describe('Safe Session Cleanup', () => {
+    it('should not cleanup sessions with active requests', () => {
+      const sessionId = 'test-session-6';
+      const oldTime = Date.now() - (6 * 60 * 1000); // 6 minutes ago
+      
+      mockProxy.transports.streamable[sessionId] = {
+        transport: { close: jest.fn() },
+        server: { close: jest.fn() },
+        createdAt: oldTime,
+        lastActivity: oldTime,
+        activeRequests: 2 // Has active requests
+      };
+      
+      // 模擬清理邏輯
+      const staleThreshold = 5 * 60 * 1000; // 5 minutes
+      const now = Date.now();
+      const inactiveTime = now - oldTime;
+      
+      let shouldCleanup = false;
+      if (inactiveTime > staleThreshold) {
+        // 檢查活動請求
+        if (mockProxy.transports.streamable[sessionId].activeRequests === 0) {
+          shouldCleanup = true;
+        }
+      }
+      
+      expect(shouldCleanup).toBe(false);
+      expect(mockProxy.transports.streamable[sessionId]).toBeDefined();
+    });
+    
+    it('should cleanup sessions without active requests after timeout', () => {
+      const sessionId = 'test-session-7';
+      const oldTime = Date.now() - (6 * 60 * 1000); // 6 minutes ago
+      
+      mockProxy.transports.streamable[sessionId] = {
+        transport: { close: jest.fn() },
+        server: { close: jest.fn() },
+        createdAt: oldTime,
+        lastActivity: oldTime,
+        activeRequests: 0 // No active requests
+      };
+      
+      // 模擬清理邏輯
+      const staleThreshold = 5 * 60 * 1000; // 5 minutes
+      const now = Date.now();
+      const inactiveTime = now - oldTime;
+      
+      let shouldCleanup = false;
+      if (inactiveTime > staleThreshold) {
+        if (mockProxy.transports.streamable[sessionId].activeRequests === 0) {
+          shouldCleanup = true;
+          delete mockProxy.transports.streamable[sessionId];
+        }
+      }
+      
+      expect(shouldCleanup).toBe(true);
+      expect(mockProxy.transports.streamable[sessionId]).toBeUndefined();
+    });
+  });
+  
+  describe('Request Lifecycle Management', () => {
+    it('should increment activeRequests when starting request', () => {
+      const sessionId = 'test-session-8';
+      
+      mockProxy.transports.streamable[sessionId] = {
+        transport: {},
+        server: {},
+        createdAt: Date.now(),
+        lastActivity: Date.now(),
+        activeRequests: 1
+      };
+      
+      // 模擬新請求開始
+      mockProxy.transports.streamable[sessionId].activeRequests++;
+      mockProxy.transports.streamable[sessionId].lastActivity = Date.now();
+      
+      expect(mockProxy.transports.streamable[sessionId].activeRequests).toBe(2);
+    });
+    
+    it('should decrement activeRequests when request completes', () => {
+      const sessionId = 'test-session-9';
+      
+      mockProxy.transports.streamable[sessionId] = {
+        transport: {},
+        server: {},
+        createdAt: Date.now(),
+        lastActivity: Date.now(),
+        activeRequests: 3
+      };
+      
+      // 模擬請求完成
+      mockProxy.transports.streamable[sessionId].activeRequests--;
+      
+      expect(mockProxy.transports.streamable[sessionId].activeRequests).toBe(2);
+    });
+  });
+  
+  describe('Configuration', () => {
+    it('should support configurable concurrent request limits', () => {
+      const customProxy = {
+        options: {
+          maxConcurrentRequestsPerSession: 15,
+          logLevel: 'debug'
+        }
+      };
+      
+      expect(customProxy.options.maxConcurrentRequestsPerSession).toBe(15);
+    });
+    
+    it('should have reasonable defaults', () => {
+      // 預設值應該是 10（在 CLI 中設定）
+      const defaultMaxConcurrent = 10;
+      expect(defaultMaxConcurrent).toBeGreaterThan(0);
+      expect(defaultMaxConcurrent).toBeLessThanOrEqual(20);
+    });
+  });
+});

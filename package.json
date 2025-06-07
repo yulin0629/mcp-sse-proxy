@@ -1,6 +1,6 @@
 {
   "name": "@yulin0629/mcp-superassistant-proxy",
-  "version": "0.0.17",
+  "version": "0.0.18",
   "description": "Enhanced fork of @srbhptl39/mcp-superassistant-proxy with improved memory management and session limits",
   "keywords": [
     "mcp",
