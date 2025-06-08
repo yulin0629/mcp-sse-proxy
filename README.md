@@ -4,9 +4,9 @@
 
 MCP SuperAssistant Proxy lets you run multiple **MCP stdio-based** and **SSE-based** servers and expose them through a single SSE endpoint. This allows MCP SuperAssistant and other tools to connect to multiple remote MCP servers and tools via a unified proxy.
 
-## Current Version: 0.0.18
+## Current Version: 0.0.19
 
-Enhanced fork featuring advanced Streamable HTTP improvements, intelligent concurrent request control, enhanced session management, and comprehensive stability enhancements.
+Enhanced fork featuring parallel server initialization, thread-safe connection management, and improved input validation for better performance with multiple MCP servers.
 
 ## Installation & Usage
 
@@ -28,6 +28,7 @@ npx -y @yulin0629/mcp-superassistant-proxy@latest --config path/to/config.json
 - `--healthEndpoint <path>`: One or more endpoints returning `"ok"` (can be used multiple times)
 - `--timeout <ms>`: Connection timeout in milliseconds (default: `30000`)
 - `--maxConcurrentRequestsPerSession <number>`: Maximum concurrent requests per session (default: `10`)
+- `--maxConcurrentServerConnections <number>`: Maximum servers to connect in parallel during initialization (default: unlimited)
 
 ## Configuration File
 

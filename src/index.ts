@@ -91,6 +91,7 @@ interface MCPSuperAssistantProxyOptions {
   healthEndpoints: string[];
   timeout: number;
   maxConcurrentRequestsPerSession: number;
+  maxConcurrentServerConnections?: number;
 }
 
 class MCPSuperAssistantProxy {
@@ -1522,16 +1523,108 @@ class MCPSuperAssistantProxy {
  async initialize(): Promise<void> {
    console.log("Initializing MCP SuperAssistant proxy...");
   
-   // Connect to all configured servers
-   for (const [serverName, serverConfig] of Object.entries(this.config.mcpServers)) {
-     try {
-       await this.connectToServer(serverName, serverConfig);
-     } catch (error) {
-       console.error(`Failed to connect to server ${serverName}:`, error);
+   const serverEntries = Object.entries(this.config.mcpServers);
+   const totalServers = serverEntries.length;
+   
+   // Validate and sanitize batch size
+   const validateBatchSize = (size?: number): number => {
+     if (!size || size <= 0 || !Number.isInteger(size)) {
+       return totalServers;
+     }
+     return Math.min(size, totalServers);
+   };
+   
+   const batchSize = validateBatchSize(this.options.maxConcurrentServerConnections);
+   
+   if (this.options.logLevel !== 'none') {
+     if (batchSize < totalServers) {
+       console.log(`Starting connection to ${totalServers} servers (batch size: ${batchSize})...`);
+     } else {
+       console.log(`Starting parallel connection to ${totalServers} servers...`);
+     }
+   }
+   
+   // Thread-safe result collection
+   const allResults: Array<{
+     serverName: string;
+     status: 'success' | 'failed';
+     error?: any;
+   }> = [];
+   
+   // Progress tracking with atomic counter
+   const progressTracker = {
+     completed: 0,
+     showProgress: () => {
+       if (this.options.logLevel !== 'none' && totalServers > 5) {
+         console.log(`Connection progress: ${progressTracker.completed}/${totalServers} servers`);
+       }
+     }
+   };
+   
+   // Process servers in batches
+   for (let i = 0; i < serverEntries.length; i += batchSize) {
+     const batch = serverEntries.slice(i, i + batchSize);
+     const batchNumber = Math.floor(i / batchSize) + 1;
+     const totalBatches = Math.ceil(serverEntries.length / batchSize);
+     
+     if (this.options.logLevel !== 'none' && totalBatches > 1) {
+       console.log(`\nProcessing batch ${batchNumber}/${totalBatches}...`);
+     }
+     
+     // Connect to servers in current batch in parallel
+     const connectionPromises = batch.map(async ([serverName, serverConfig]) => {
+       try {
+         await this.connectToServer(serverName, serverConfig);
+         return { serverName, status: 'success' as const };
+       } catch (error) {
+         console.error(`Failed to connect to server ${serverName}:`, error);
+         return { serverName, status: 'failed' as const, error };
+       }
+     });
+     
+     // Wait for current batch to complete and collect results atomically
+     const batchResults = await Promise.allSettled(connectionPromises);
+     
+     // Process batch results in a thread-safe manner
+     batchResults.forEach((result) => {
+       progressTracker.completed++;
+       progressTracker.showProgress();
+       
+       if (result.status === 'fulfilled') {
+         allResults.push(result.value);
+       } else {
+         // Handle Promise rejection (shouldn't happen with our try-catch, but just in case)
+         allResults.push({
+           serverName: 'unknown',
+           status: 'failed',
+           error: result.reason
+         });
+       }
+     });
+   }
+   
+   // Extract successful and failed servers from collected results
+   const successful = allResults
+     .filter(r => r.status === 'success')
+     .map(r => r.serverName);
+   const failed = allResults
+     .filter(r => r.status === 'failed')
+     .map(r => r.serverName);
+   
+   // Summarize results
+   if (this.options.logLevel !== 'none') {
+     console.log(`\nConnection summary:`);
+     console.log(`✓ Successfully connected: ${successful.length} servers`);
+     if (successful.length > 0 && this.options.logLevel === 'debug') {
+       console.log(`  - ${successful.join(', ')}`);
+     }
+     if (failed.length > 0) {
+       console.log(`✗ Failed connections: ${failed.length} servers`);
+       console.log(`  - ${failed.join(', ')}`);
      }
    }
   
-   console.log(`Successfully initialized mcpsuperassistantproxy with ${this.connectedServers.size} servers`);
+   console.log(`\nSuccessfully initialized mcpsuperassistantproxy with ${this.connectedServers.size} servers`);
  }
 
  private async connectToServer(serverName: string, config: MCPServerConfig): Promise<void> {
@@ -1933,6 +2026,10 @@ async function main() {
       default: 10,
       description: 'Maximum concurrent requests per session'
     })
+    .option('maxConcurrentServerConnections', {
+      type: 'number',
+      description: 'Maximum number of servers to connect in parallel (default: unlimited)'
+    })
     .option('debug', {
       type: 'boolean',
       default: false,
@@ -1952,7 +2049,8 @@ async function main() {
       cors: argv.cors,
       healthEndpoints: (argv.healthEndpoint as string[]) || [],
       timeout: argv.timeout,
-      maxConcurrentRequestsPerSession: argv.maxConcurrentRequestsPerSession
+      maxConcurrentRequestsPerSession: argv.maxConcurrentRequestsPerSession,
+      maxConcurrentServerConnections: argv.maxConcurrentServerConnections
     };
 
     // Create and initialize mcpsuperassistantproxy
@@ -2068,6 +2166,7 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
   --cors              Enable CORS (default: true)
   --healthEndpoint    One or more health endpoints returning "ok"
   --timeout           Connection timeout in milliseconds (default: 30000)
+  --maxConcurrentServerConnections  Maximum servers to connect in parallel (default: unlimited)
   --debug             Enable debug logging (same as --logLevel debug)
  
  Example mcpconfig.json:

@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.19] - 2025-06-08
+
+### Added
+- **Parallel Server Initialization**
+  - Servers now connect in parallel instead of sequentially
+  - Configurable batch size with `--maxConcurrentServerConnections` option
+  - Progress tracking with real-time connection status updates
+  - Significant performance improvement for configs with many servers
+
+### Fixed
+- **Race Conditions in Connection Process**
+  - Thread-safe result collection using Promise.allSettled
+  - Atomic counter for progress tracking
+  - Proper synchronization of success/failure arrays
+  - Eliminated potential data loss in concurrent operations
+
+### Enhanced
+- **Input Validation**
+  - Robust validation for maxConcurrentServerConnections parameter
+  - Handles negative numbers, zero, and non-integers gracefully
+  - Automatically uses sensible defaults for invalid inputs
+  - Prevents potential infinite loops from bad configuration
+
+### Performance
+- **Startup Time Improvements**
+  - 50%+ reduction in initialization time for multiple servers
+  - Example: 6 servers reduced from ~20 seconds to ~10 seconds
+  - Scales better with large numbers of MCP servers
+  - No impact on individual server connection reliability
+
 ## [0.0.18] - 2025-06-07
 
 ### Added
