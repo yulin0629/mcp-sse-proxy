@@ -1526,15 +1526,12 @@ class MCPSuperAssistantProxy {
    const serverEntries = Object.entries(this.config.mcpServers);
    const totalServers = serverEntries.length;
    
-   // Validate and sanitize batch size
-   const validateBatchSize = (size?: number): number => {
-     if (!size || size <= 0 || !Number.isInteger(size)) {
-       return totalServers;
-     }
-     return Math.min(size, totalServers);
-   };
-   
-   const batchSize = validateBatchSize(this.options.maxConcurrentServerConnections);
+   // Validate batch size: must be positive integer, defaults to totalServers
+   const batchSize = (!this.options.maxConcurrentServerConnections || 
+                     this.options.maxConcurrentServerConnections <= 0 || 
+                     !Number.isInteger(this.options.maxConcurrentServerConnections))
+     ? totalServers 
+     : Math.min(this.options.maxConcurrentServerConnections, totalServers);
    
    if (this.options.logLevel !== 'none') {
      if (batchSize < totalServers) {
@@ -1544,22 +1541,15 @@ class MCPSuperAssistantProxy {
      }
    }
    
-   // Thread-safe result collection
+   // Result collection
    const allResults: Array<{
      serverName: string;
      status: 'success' | 'failed';
      error?: any;
    }> = [];
    
-   // Progress tracking with atomic counter
-   const progressTracker = {
-     completed: 0,
-     showProgress: () => {
-       if (this.options.logLevel !== 'none' && totalServers > 5) {
-         console.log(`Connection progress: ${progressTracker.completed}/${totalServers} servers`);
-       }
-     }
-   };
+   // Progress tracking
+   let completed = 0;
    
    // Process servers in batches
    for (let i = 0; i < serverEntries.length; i += batchSize) {
@@ -1571,45 +1561,36 @@ class MCPSuperAssistantProxy {
        console.log(`\nProcessing batch ${batchNumber}/${totalBatches}...`);
      }
      
-     // Connect to servers in current batch in parallel
-     const connectionPromises = batch.map(async ([serverName, serverConfig]) => {
-       try {
-         await this.connectToServer(serverName, serverConfig);
-         return { serverName, status: 'success' as const };
-       } catch (error) {
-         console.error(`Failed to connect to server ${serverName}:`, error);
-         return { serverName, status: 'failed' as const, error };
-       }
-     });
+     const batchResults = await Promise.allSettled(
+       batch.map(async ([serverName, serverConfig]) => {
+         try {
+           await this.connectToServer(serverName, serverConfig);
+           return { serverName, status: 'success' as const };
+         } catch (error) {
+           console.error(`Failed to connect to server ${serverName}:`, error);
+           return { serverName, status: 'failed' as const, error };
+         }
+       })
+     );
      
-     // Wait for current batch to complete and collect results atomically
-     const batchResults = await Promise.allSettled(connectionPromises);
-     
-     // Process batch results in a thread-safe manner
+     // Collect batch results
      batchResults.forEach((result) => {
-       progressTracker.completed++;
-       progressTracker.showProgress();
-       
-       if (result.status === 'fulfilled') {
-         allResults.push(result.value);
-       } else {
-         // Handle Promise rejection (shouldn't happen with our try-catch, but just in case)
-         allResults.push({
-           serverName: 'unknown',
-           status: 'failed',
-           error: result.reason
-         });
+       completed++;
+       if (this.options.logLevel !== 'none' && totalServers > 5) {
+         console.log(`Connection progress: ${completed}/${totalServers} servers`);
        }
+       
+       // Promise.allSettled always fulfills, so we only need to check the inner value
+       allResults.push(result.status === 'fulfilled' ? result.value : {
+         serverName: 'unknown',
+         status: 'failed' as const,
+         error: result.reason
+       });
      });
    }
    
-   // Extract successful and failed servers from collected results
-   const successful = allResults
-     .filter(r => r.status === 'success')
-     .map(r => r.serverName);
-   const failed = allResults
-     .filter(r => r.status === 'failed')
-     .map(r => r.serverName);
+   const successful = allResults.filter(r => r.status === 'success').map(r => r.serverName);
+   const failed = allResults.filter(r => r.status === 'failed').map(r => r.serverName);
    
    // Summarize results
    if (this.options.logLevel !== 'none') {
